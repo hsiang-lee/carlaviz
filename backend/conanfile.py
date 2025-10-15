@@ -1,6 +1,6 @@
-from conans import ConanFile
+from conan import ConanFile
 from conan.tools.cmake import CMakeToolchain, CMakeDeps, CMake, cmake_layout
-from conans.tools import Git
+from conan.tools.scm import Git
 import os
 
 
@@ -53,9 +53,10 @@ class CarlaViz(ConanFile):
     def requirements(self):
         self.requires("gflags/2.2.2")  # for cmd option parse
         self.requires("spdlog/1.12.0")
-        self.requires("fmt/9.1.0")
+        self.requires("fmt/10.2.1")
         if self.options.simulator == "carla":
-            self.requires("carla/0.9.15")
+            # self.requires("carla/0.9.15")
+            self.requires("boost/1.80.0")
         if self.options.frontend == "xviz":
             self.requires("xviz/0.5.1")
             # require GeoJson

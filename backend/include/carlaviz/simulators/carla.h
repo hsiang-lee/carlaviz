@@ -113,7 +113,7 @@ class CarlaSimulator
  private:
   friend class SimulatorBase<CarlaSimulator<TranslationType>, TranslationType>;
   std::unique_ptr<carla::client::Client> client_{nullptr};
-  std::unordered_map<SensorIDType, boost::shared_ptr<carla::client::Sensor>>
+  std::unordered_map<SensorIDType, std::shared_ptr<carla::client::Sensor>>
       sensor_objects_;
   // variables to remove stale point cloud
   std::unordered_map<SensorIDType, std::deque<sensor::LidarPointsWithTimestamp>>
@@ -121,7 +121,7 @@ class CarlaSimulator
 
   void CheckAndLoadMap(const carla::client::World& world) {
     auto carla_map = world.GetMap();
-    if (carla_map->GetName() != this->map_.Name()) {
+    if (carla_map->GetName() != this->map_.Name() || carla_map->GetOpenDrive().size() != this->map_.OpenDriveSize()) {
       // first reset previous map
       this->map_.Reset();
       // set scale
@@ -136,89 +136,92 @@ class CarlaSimulator
   }
 
   void ProcessFrame(const carla::client::World& world) {
-    auto world_snapshot =
-        world.WaitForTick(std::chrono::seconds(this->option_.timeout_seconds));
-    this->current_frame_.store(
-        static_cast<FrameType>(world_snapshot.GetFrame()));
+    try {
+      auto world_snapshot = world.WaitForTick(std::chrono::seconds(this->option_.timeout_seconds));
+      this->current_frame_.store(
+          static_cast<FrameType>(world_snapshot.GetFrame()));
+      auto now = world_snapshot.GetTimestamp().elapsed_seconds;
+      this->translation_.UpdateTime(now, world_snapshot.GetFrame());
 
-    auto now = world_snapshot.GetTimestamp().elapsed_seconds;
-
-    this->translation_.UpdateTime(now, world_snapshot.GetFrame());
-
-    // add objects/sensors
-    for (const auto& actor_snapshot : world_snapshot) {
-      auto actor = world.GetActor(actor_snapshot.id);
-      logging::LogDebug("actor type: {}", actor->GetTypeId());
-      if (utils::StartWith(actor->GetTypeId(), "vehicle")) {
-        // handle vehicles
-        if (IsEgoVehicle(*actor)) {
-          this->translation_.UpdatePose(
-              now, GetPosition(*actor), GetOrientation(*actor),
-              actor->GetVelocity().Length(), actor->GetAcceleration().Length());
-        } else {
-          this->translation_.UpdateVehicle(actor->GetTypeId(),
-                                           GetVerticesOfObject(*actor),
-                                           GetHeightOfObject(*actor));
-        }
-      } else if (utils::StartWith(actor->GetTypeId(), "walker")) {
-        // handle pedestrians
-        this->translation_.UpdatePeople(actor->GetTypeId(),
-                                        GetVerticesOfObject(*actor),
-                                        GetHeightOfObject(*actor));
-      } else if (actor->GetTypeId() == "traffic.traffic_light") {
-        auto traffic_light =
-            boost::dynamic_pointer_cast<carla::client::TrafficLight>(actor);
-        if (!traffic_light) {
-          logging::LogError(
-              "Game actor of id {} has type id of traffic light but cannot be "
-              "downcast to TrafficLight object, something must be wrong!",
-              actor->GetId());
-          continue;
-        }
-        this->translation_.UpdateTrafficLight(
-            actor->GetId(),
-            FromCarlaTrafficLightState(traffic_light->GetState()));
-      } else if (utils::StartWith(actor->GetTypeId(), "sensor")) {
-        // handle sensors
-        if (!this->AddSensor(actor->GetId(), actor->GetTypeId())) {
-          // we may already add this sensor in last loop
-          // or this sensor is not enabled
-          continue;
-        }
-        if (utils::StartWith(actor->GetTypeId(), "sensor.camera")) {
-          ListenToSensor(
-              actor,
-              [this, actor](boost::shared_ptr<carla::sensor::SensorData> data) {
-                this->HandleImageData(actor->GetId(), actor->GetTypeId(), data);
-              });
-        } else if (utils::StartWith(actor->GetTypeId(),
-                                    "sensor.lidar.ray_cast")) {
-          double rotation_frequency = 10.0;
-          for (const auto& attribute : actor->GetAttributes()) {
-            if (attribute.GetId() == "rotation_frequency") {
-              rotation_frequency = std::stod(attribute.GetValue());
-              break;
-            }
-          }
-          if (actor->GetTypeId() == "sensor.lidar.ray_cast") {
-            ListenToSensor(
-                actor, [this, actor, rotation_frequency](
-                           boost::shared_ptr<carla::sensor::SensorData> data) {
-                  this->template HandleLidarMeasurementData<false>(
-                      actor->GetId(), actor->GetTypeId(), data,
-                      rotation_frequency);
-                });
+      // add objects/sensors
+      for (const auto& actor_snapshot : world_snapshot) {
+        auto actor = world.GetActor(actor_snapshot.id);
+        logging::LogDebug("actor type: {}", actor->GetTypeId());
+        if (utils::StartWith(actor->GetTypeId(), "vehicle")) {
+          // handle vehicles
+          if (IsEgoVehicle(*actor)) {
+            this->translation_.UpdatePose(
+                now, GetPosition(*actor), GetOrientation(*actor),
+                actor->GetVelocity().Length(), actor->GetAcceleration().Length());
           } else {
+            this->translation_.UpdateVehicle(actor->GetTypeId(),
+                                             GetVerticesOfObject(*actor),
+                                             GetHeightOfObject(*actor));
+          }
+        } else if (utils::StartWith(actor->GetTypeId(), "walker")) {
+          // handle pedestrians
+          this->translation_.UpdatePeople(actor->GetTypeId(),
+                                          GetVerticesOfObject(*actor),
+                                          GetHeightOfObject(*actor));
+        } else if (actor->GetTypeId() == "traffic.traffic_light") {
+          auto traffic_light =
+              std::dynamic_pointer_cast<carla::client::TrafficLight>(actor);
+          if (!traffic_light) {
+            logging::LogError(
+                "Game actor of id {} has type id of traffic light but cannot be "
+                "downcast to TrafficLight object, something must be wrong!",
+                actor->GetId());
+            continue;
+          }
+          this->translation_.UpdateTrafficLight(
+              actor->GetId(),
+              FromCarlaTrafficLightState(traffic_light->GetState()));
+        } else if (utils::StartWith(actor->GetTypeId(), "sensor")) {
+          // handle sensors
+          if (!this->AddSensor(actor->GetId(), actor->GetTypeId())) {
+            // we may already add this sensor in last loop
+            // or this sensor is not enabled
+            continue;
+          }
+          if (utils::StartWith(actor->GetTypeId(), "sensor.camera")) {
             ListenToSensor(
-                actor, [this, actor, rotation_frequency](
-                           boost::shared_ptr<carla::sensor::SensorData> data) {
-                  this->template HandleLidarMeasurementData<true>(
-                      actor->GetId(), actor->GetTypeId(), data,
-                      rotation_frequency);
+                actor,
+                [this, actor](std::shared_ptr<carla::sensor::SensorData> data) {
+                  this->HandleImageData(actor->GetId(), actor->GetTypeId(), data);
                 });
+          } else if (utils::StartWith(actor->GetTypeId(),
+                                      "sensor.lidar.ray_cast")) {
+            double rotation_frequency = 10.0;
+            for (const auto& attribute : actor->GetAttributes()) {
+              if (attribute.GetId() == "rotation_frequency") {
+                rotation_frequency = std::stod(attribute.GetValue());
+                break;
+              }
+            }
+            if (actor->GetTypeId() == "sensor.lidar.ray_cast") {
+              ListenToSensor(
+                  actor, [this, actor, rotation_frequency](
+                             std::shared_ptr<carla::sensor::SensorData> data) {
+                    this->template HandleLidarMeasurementData<false>(
+                        actor->GetId(), actor->GetTypeId(), data,
+                        rotation_frequency);
+                  });
+            } else {
+              ListenToSensor(
+                  actor, [this, actor, rotation_frequency](
+                             std::shared_ptr<carla::sensor::SensorData> data) {
+                    this->template HandleLidarMeasurementData<true>(
+                        actor->GetId(), actor->GetTypeId(), data,
+                        rotation_frequency);
+                  });
+            }
           }
         }
       }
+    } catch (const std::exception& e) {
+      logging::LogError("Failed to wait for tick from Carla, error: {}",
+                        e.what());
+      return;
     }
 
     this->ClearRemovedSensors();
@@ -235,7 +238,7 @@ class CarlaSimulator
   }
 
   template <typename FuncType>
-  void ListenToSensor(boost::shared_ptr<carla::client::Actor> actor,
+  void ListenToSensor(std::shared_ptr<carla::client::Actor> actor,
                       FuncType&& func) {
     // Note: only process below sensors:
     //   cameras:
@@ -246,7 +249,7 @@ class CarlaSimulator
     //   lidars:
     //     sensor.lidar.ray_cast
     //     sensor.lidar.ray_cast_semantic
-    auto sensor = boost::static_pointer_cast<carla::client::Sensor>(actor);
+    auto sensor = std::static_pointer_cast<carla::client::Sensor>(actor);
     auto id = static_cast<SensorIDType>(actor->GetId());
     auto type_id = actor->GetTypeId();
 
@@ -285,7 +288,7 @@ class CarlaSimulator
         std::conditional_t<IsSemantic,
                            carla::sensor::data::SemanticLidarMeasurement,
                            carla::sensor::data::LidarMeasurement>;
-    auto lidar_data = boost::dynamic_pointer_cast<DataType>(data);
+    auto lidar_data = std::dynamic_pointer_cast<DataType>(data);
     if (!lidar_data) {
       logging::LogError(
           "Cannot parse lidar data from sensor {} of id {}, something must be "
@@ -367,7 +370,7 @@ class CarlaSimulator
   void HandleImageData(SensorIDType sensor_id, const std::string& type_id,
                        carla::SharedPtr<carla::sensor::SensorData> data) {
     bool create_dummy = !CheckSensorDataFrame(sensor_id, type_id, data);
-    auto image = boost::dynamic_pointer_cast<carla::sensor::data::Image>(data);
+    auto image = std::dynamic_pointer_cast<carla::sensor::data::Image>(data);
     if (!image) {
       logging::LogError("Cannot parse image data from sensor {} of id {}",
                         type_id, sensor_id);
@@ -505,7 +508,7 @@ class CarlaSimulator
     }
   }
 
-  void AddStopSign(boost::shared_ptr<carla::client::Actor> stop_sign,
+  void AddStopSign(std::shared_ptr<carla::client::Actor> stop_sign,
                    const carla::client::Map& map) {
     auto stop_sign_waypoint = map.GetWaypoint(stop_sign->GetLocation(), false);
     auto stop_sign_transform = stop_sign->GetTransform();
@@ -547,9 +550,9 @@ class CarlaSimulator
         stop_sign_transform.rotation.yaw);
   }
 
-  void AddTrafficLight(boost::shared_ptr<carla::client::Actor> actor) {
+  void AddTrafficLight(std::shared_ptr<carla::client::Actor> actor) {
     auto traffic_light =
-        boost::dynamic_pointer_cast<carla::client::TrafficLight>(actor);
+        std::dynamic_pointer_cast<carla::client::TrafficLight>(actor);
     if (!traffic_light) {
       logging::LogError(
           "Game actor of id {} has type id of traffic light but cannot be "

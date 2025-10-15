@@ -44,6 +44,8 @@
 #include <unordered_map>
 #include <vector>
 
+using carla::road::element::LaneMarking;
+
 namespace carlaviz::map {
 
 namespace detail {
@@ -106,7 +108,14 @@ class StaticObjectSelector<StaticObjectType, StaticObjectTypes...> {
 
 using Point = utils::Location;
 
+enum class LineType {
+  kNone = 0,
+  kSolid = 1,
+  kBroken = 2,
+};
+
 struct Line {
+  std::string type;
   std::vector<Point> points;
 };
 
@@ -231,6 +240,7 @@ class Map {
 
   void SetName(const std::string& name) { name_ = name; }
   std::string Name() const { return name_; }
+  uint64_t OpenDriveSize() const { return opendrive_size_; }
 
   void SetScale(const std::array<double, 3>& scale) { scale_ = scale; }
   std::array<double, 3> Scale() { return scale_; }
@@ -286,6 +296,7 @@ class Map {
  public:
   void FromCarlaMap(const carla::client::Map& map) {
     name_ = map.GetName();
+    opendrive_size_ = map.GetOpenDrive().size();
     for (const auto& [point_start, point_end] : map.GetTopology()) {
       AddOneRoad(point_start);
       AddOneRoad(point_end);
@@ -293,6 +304,31 @@ class Map {
   }
 
  private:
+  std::string GetLineTypeStr(LaneMarking::Type type) {
+    switch (type) {
+      case LaneMarking::Type::Broken:
+        return "broken";
+      case LaneMarking::Type::Solid:
+        return "solid";
+      case LaneMarking::Type::SolidSolid:
+        return "double_solid";
+      case LaneMarking::Type::SolidBroken:
+        return "solid_broken";
+      case LaneMarking::Type::BrokenSolid:
+        return "broken_solid";
+      case LaneMarking::Type::BrokenBroken:
+        return "broken_broken";
+      case LaneMarking::Type::BottsDots:
+        return "botts_dots";
+      case LaneMarking::Type::Grass:
+        return "grass";
+      case LaneMarking::Type::Curb:
+        return "curb";      
+      default:
+        return "none";
+    }
+  }
+  
   void AddOneRoad(const carla::SharedPtr<carla::client::Waypoint>& waypoint) {
     std::vector<carla::SharedPtr<carla::client::Waypoint>> tmp_waypoints;
     uint32_t road_id = waypoint->GetRoadId();
@@ -314,8 +350,12 @@ class Map {
     Road& new_road = AddRoad(road_id);
     std::vector<Point> points;
     for (const auto& waypoint : tmp_waypoints) {
+      const auto left_line_type = GetLineTypeStr(waypoint->GetLeftLaneMarking()->type);
+      new_road.left_boundary.type = left_line_type;
       new_road.left_boundary.points.push_back(LateralShift(
           waypoint->GetTransform(), -waypoint->GetLaneWidth() * 0.5));
+      const auto right_line_type = GetLineTypeStr(waypoint->GetRightLaneMarking()->type);
+      new_road.right_boundary.type = right_line_type;
       new_road.right_boundary.points.push_back(LateralShift(
           waypoint->GetTransform(), waypoint->GetLaneWidth() * 0.5));
     }
@@ -339,8 +379,8 @@ class Map {
     json["type"] = "FeatureCollection";
     uint64_t idx = 0;
     for (const auto& road : roads_) {
-      AddOneLineIntoGeoJson(road.left_boundary.points, "road", json, idx);
-      AddOneLineIntoGeoJson(road.right_boundary.points, "road", json, idx + 1);
+      AddOneLineIntoGeoJson(road.left_boundary.points, "road", json, idx, road.left_boundary.type);
+      AddOneLineIntoGeoJson(road.right_boundary.points, "road", json, idx + 1, road.right_boundary.type);
       idx += 2;
     }
     for (const auto& stop_sign : stop_signs_) {
@@ -382,26 +422,52 @@ class Map {
       AddPolygonWithHeight(obj.vertices, obj.height, obj.type_str, json, idx);
       idx += 1;
     }
+
+    if (!json.contains("features")) {
+      json["features"] = nlohmann::json::array();
+    }
+
     return json;
   }
 
  private:
   void AddOneLineIntoGeoJson(const std::vector<Point>& points,
                              const std::string& type, nlohmann::json& json,
-                             uint64_t index) const {
+                             uint64_t index, std::string line_type = "none") const {
     json["features"][index]["type"] = "Feature";
     json["features"][index]["id"] = std::to_string(index);
     json["features"][index]["properties"]["type"] = type;
     json["features"][index]["geometry"]["type"] = "LineString";
     int i = 0;
-    for (const auto& point : points) {
-      json["features"][index]["geometry"]["coordinates"][i][0] =
-          point.x * scale_[0];
-      json["features"][index]["geometry"]["coordinates"][i][1] =
-          point.y * scale_[1];
-      json["features"][index]["geometry"]["coordinates"][i][2] =
-          point.z * scale_[2];
-      i++;
+    if (line_type == "broken" || line_type == "broken_solid" || line_type == "broken_broken") {
+      json["features"][index]["geometry"]["type"] = "MultiLineString";
+      for (const auto& point : points) {
+        if(i % 3 == 0 && i == points.size() - 1) {
+          break;
+        }
+        
+        if (i % 3 == 0) {
+          json["features"][index]["geometry"]["coordinates"][int(i/3)] =
+              nlohmann::json::array();
+        }
+        json["features"][index]["geometry"]["coordinates"][int(i/3)][i % 3][0] =
+            point.x * scale_[0];
+        json["features"][index]["geometry"]["coordinates"][int(i/3)][i % 3][1] =
+            point.y * scale_[1];
+        json["features"][index]["geometry"]["coordinates"][int(i/3)][i % 3][2] =
+            point.z * scale_[2];
+        ++i;
+      }
+    } else {
+      for (const auto& point : points) {
+        json["features"][index]["geometry"]["coordinates"][i][0] =
+            point.x * scale_[0];
+        json["features"][index]["geometry"]["coordinates"][i][1] =
+            point.y * scale_[1];
+        json["features"][index]["geometry"]["coordinates"][i][2] =
+            point.z * scale_[2];
+        ++i;
+      }
     }
   }
 
@@ -434,6 +500,7 @@ class Map {
 #endif
 
  private:
+  uint64_t opendrive_size_ {0};
   std::string name_;
   std::array<double, 3> scale_{1, 1, 1};
   std::vector<Road> roads_;

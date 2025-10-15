@@ -1,6 +1,7 @@
 find_package(gflags REQUIRED)
 find_package(spdlog REQUIRED)
 find_package(fmt REQUIRED)
+find_package(Boost REQUIRED system)
 
 add_library(
   carlaviz
@@ -18,8 +19,11 @@ message(STATUS "CarlaViz is using simulator ${CARLAVIZ_SIMULATOR}")
 message(STATUS "CarlaViz is using frontend ${CARLAVIZ_FRONTEND}")
 
 if(CARLAVIZ_SIMULATOR STREQUAL "CARLA")
-  find_package(carla REQUIRED)
-  target_link_libraries(carlaviz carla::client)
+  # find_package(carla REQUIRED)
+  # target_link_libraries(carlaviz carla::client)
+  target_include_directories(carlaviz PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../libcarla0.10.0/include)
+  target_link_directories(carlaviz PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/../libcarla0.10.0/lib)
+  target_link_libraries(carlaviz carla-client rpc Detour DetourCrowd Boost::system)
   target_compile_definitions(carlaviz PUBLIC CARLAVIZ_SIMULATOR_CARLA=1)
 elseif()
   message(
