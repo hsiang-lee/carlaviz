@@ -1,5 +1,5 @@
 # Frontend build stage
-FROM node:18-alpine AS frontend
+FROM node:20-alpine AS frontend
 
 COPY ./frontend /home/carlaviz/frontend
 
@@ -10,11 +10,11 @@ RUN yarn
 RUN yarn build
 
 # Backend build stage
-FROM ubuntu:22.04 AS backend
+FROM addev.bicv.com:8443/common/ubuntu:24.04 AS backend
 
-RUN apt update
-RUN apt install -y make g++-11 pip cmake
-RUN pip3 install conan==1.55.0
+RUN apt update && apt install -y make g++-11 pip cmake python3.12-venv && python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+RUN pip3 install conan==1.66.0
 
 # Add conan registry for xviz
 RUN conan remote add gitlab https://gitlab.com/api/v4/projects/44861904/packages/conan
@@ -27,7 +27,7 @@ RUN conan install -pr /home/carlaviz/profiles/gcc11 --build=missing -s build_typ
 RUN conan build ..
 
 # Release stage
-FROM nginx:1.25.1
+FROM nginx:1.29.2
 
 # frontend
 COPY --from=frontend /home/carlaviz/frontend/dist/ /var/www/carlaviz/
